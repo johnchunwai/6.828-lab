@@ -9,6 +9,19 @@
 #include <kern/pmap.h>
 #include <kern/kclock.h>
 
+// Test the stack backtrace function (lab 1 only)
+void
+test_backtrace(int x)
+{
+	cprintf("entering test_backtrace %d\n", x);
+	if (x > 0)
+		test_backtrace(x-1);
+	else {
+		asm_mon_backtrace(0, 0, 0);
+		c_mon_backtrace(0, 0, 0);
+	}
+	cprintf("leaving test_backtrace %d\n", x);
+}
 
 void
 i386_init(void)
@@ -23,6 +36,9 @@ i386_init(void)
 	// Initialize the console.
 	// Can't call cprintf until after we do this!
 	cons_init();
+
+	int x = 1, y = 3, z = 4, a = 5;
+	cprintf("\xdd""x %d, \xdey %x, \xdfz %d, \xdc""a %d\n", x, y, z, a);
 
 	cprintf("6828 decimal is %o octal!\n", 6828);
 

@@ -8,6 +8,13 @@
 
 #include <kern/console.h>
 
+#define CGA_WHITE 0x700
+#define CGA_RED 0xc00
+#define CGA_YELLOW 0xe00
+#define CGA_CYAN 0xb00
+
+static int g_color = CGA_WHITE;
+
 static void cons_intr(int (*proc)(void));
 static void cons_putc(int c);
 
@@ -44,6 +51,7 @@ delay(void)
 #define   COM_LSR_DATA	0x01	//   Data available
 #define   COM_LSR_TXRDY	0x20	//   Transmit buffer avail
 #define   COM_LSR_TSRE	0x40	//   Transmitter off
+
 
 static bool serial_exists;
 
@@ -108,6 +116,12 @@ serial_init(void)
 // For information on PC parallel port programming, see the class References
 // page.
 
+#define DATA_PORT		0x378
+#define STATUS_PORT 	0x379
+#define CONTROL_PORT	0x37a
+#define BUSY			0x80
+#define STROBE			0x01
+
 static void
 lpt_putc(int c)
 {
@@ -164,7 +178,7 @@ cga_putc(int c)
 {
 	// if no attribute given, then use black on white
 	if (!(c & ~0xFF))
-		c |= 0x0700;
+		c |= g_color;
 
 	switch (c & 0xff) {
 	case '\b':
@@ -192,6 +206,7 @@ cga_putc(int c)
 	}
 
 	// What is the purpose of this?
+	// Scroll the display up by one row of characters.
 	if (crt_pos >= CRT_SIZE) {
 		int i;
 
@@ -473,4 +488,26 @@ iscons(int fdnum)
 {
 	// used by readline
 	return 1;
+}
+
+void
+csetcolor(char color)
+{
+	switch (color)
+	{
+		case WHITE:
+			g_color = CGA_WHITE;
+			break;
+		case RED:
+			g_color = CGA_RED;
+			break;
+		case YELLOW:
+			g_color = CGA_YELLOW;
+			break;
+		case CYAN:
+			g_color = CGA_CYAN;
+			break;
+		default:
+			g_color = CGA_WHITE;
+	}
 }

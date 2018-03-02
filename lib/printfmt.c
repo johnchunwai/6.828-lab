@@ -92,6 +92,14 @@ vprintfmt(void (*putch)(int, void*), void *putdat, const char *fmt, va_list ap)
 		while ((ch = *(unsigned char *) fmt++) != '%') {
 			if (ch == '\0')
 				return;
+			// const int WHITE = 0xdc;
+			// const int RED = 0xdd;
+			// const int YELLOW = 0xde;
+			// const int CYAN = 0xdf;
+			if ((unsigned char)ch >= (unsigned char)WHITE && (unsigned char)ch <= (unsigned char)CYAN) {
+				csetcolor(ch);
+				continue;
+			}
 			putch(ch, putdat);
 		}
 
@@ -206,10 +214,9 @@ vprintfmt(void (*putch)(int, void*), void *putdat, const char *fmt, va_list ap)
 		// (unsigned) octal
 		case 'o':
 			// Replace this with your code.
-			putch('X', putdat);
-			putch('X', putdat);
-			putch('X', putdat);
-			break;
+			num = getuint(&ap, lflag);
+			base = 8;
+			goto number;
 
 		// pointer
 		case 'p':

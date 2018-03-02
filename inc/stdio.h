@@ -7,10 +7,16 @@
 #define NULL	((void *) 0)
 #endif /* !NULL */
 
+#define WHITE '\xdc'
+#define RED '\xdd'
+#define YELLOW '\xde'
+#define CYAN '\xdf'
+
 // lib/console.c
 void	cputchar(int c);
 int	getchar(void);
 int	iscons(int fd);
+void csetcolor(char color);
 
 // lib/printfmt.c
 void	printfmt(void (*putch)(int, void*), void *putdat, const char *fmt, ...);

@@ -102,8 +102,17 @@ boot_alloc(uint32_t n)
 	// to a multiple of PGSIZE.
 	//
 	// LAB 2: Your code here.
+	result = nextfree;
 
-	return NULL;
+	if (n != 0) {
+		// make sure we're not overflowing memory
+		char * endaddr = nextfree + ROUNDUP(n, PGSIZE);
+		if (PADDR(endaddr) / PGSIZE > npages)
+			panic("Running out of memory.");
+		nextfree = endaddr;
+	}
+
+	return result;
 }
 
 // Set up a two-level page table:
@@ -125,7 +134,7 @@ mem_init(void)
 	i386_detect_memory();
 
 	// Remove this line when you're ready to test this function.
-	panic("mem_init: This function is not finished\n");
+	// panic("mem_init: This function is not finished\n");
 
 	//////////////////////////////////////////////////////////////////////
 	// create initial page directory.
@@ -148,7 +157,8 @@ mem_init(void)
 	// array.  'npages' is the number of physical pages in memory.  Use memset
 	// to initialize all fields of each struct PageInfo to 0.
 	// Your code goes here:
-
+	pages = (struct PageInfo *) boot_alloc(sizeof(struct PageInfo) * npages);
+	memset(pages, 0, sizeof(struct PageInfo) * npages);
 
 	//////////////////////////////////////////////////////////////////////
 	// Now that we've allocated the initial kernel data structures, we set
@@ -252,10 +262,32 @@ page_init(void)
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
 	size_t i;
-	for (i = 0; i < npages; i++) {
-		pages[i].pp_ref = 0;
-		pages[i].pp_link = page_free_list;
-		page_free_list = &pages[i];
+	// preserver 1st page for real-mode IDT and BIOS
+	pages[0].pp_ref = 1;
+
+	for (i = 1; i < npages; i++) {
+		physaddr_t pa, pa_nextfree;
+		pa = page2pa(&pages[i]);
+		assert(pa == i * PGSIZE);
+		pa_nextfree = PADDR(boot_alloc(0));
+
+		if (pa >= IOPHYSMEM && pa < EXTPHYSMEM) {
+			// IO hole must never be allocated
+			// kernel pages are never released. So, setting ref is optional.
+			// pages[i].pp_ref = 1;
+		}
+		else if (pa >= EXTPHYSMEM && pa < pa_nextfree) {
+			// kernel actually starts at EXTPHYSMEM == PADDR((void*)0xF0100000)
+			assert(PADDR((void*)0xF0100000) == EXTPHYSMEM);
+			// start of kernel until the nextfree is allocated already
+			// kernel pages are never released. So, setting ref is optional.
+			// pages[i].pp_ref = 1;
+		}
+		else {
+			pages[i].pp_ref = 0;
+			pages[i].pp_link = page_free_list;
+			page_free_list = &pages[i];
+		}
 	}
 }
 
@@ -274,8 +306,19 @@ page_init(void)
 struct PageInfo *
 page_alloc(int alloc_flags)
 {
+	struct PageInfo *pp;
 	// Fill this function in
-	return 0;
+	if (page_free_list == NULL)
+		return NULL;
+
+	pp = page_free_list;
+	page_free_list = pp->pp_link;
+	pp->pp_link = NULL;
+
+	if (alloc_flags & ALLOC_ZERO)
+		memset(page2kva(pp), 0, PGSIZE);
+
+	return pp;
 }
 
 //
@@ -288,6 +331,12 @@ page_free(struct PageInfo *pp)
 	// Fill this function in
 	// Hint: You may want to panic if pp->pp_ref is nonzero or
 	// pp->pp_link is not NULL.
+	if (pp->pp_ref != 0)
+		panic("page_free() when pp_ref is %d", pp->pp_ref);
+	if (pp->pp_link != NULL)
+		panic("page_free() when pp_link is 0x%08x", pp->pp_ref);
+	pp->pp_link = page_free_list;
+	page_free_list = pp;
 }
 
 //
@@ -326,8 +375,26 @@ page_decref(struct PageInfo* pp)
 pte_t *
 pgdir_walk(pde_t *pgdir, const void *va, int create)
 {
-	// Fill this function in
-	return NULL;
+	pde_t *ppde = pgdir + PDX(va);
+	if (*ppde == 0) {
+		// return null if dir entry not exist and create is false
+		if (create == false)
+			return NULL;
+		// create page table entry if not exist
+		// alloc the page for the page table
+		struct PageInfo *pg_info = page_alloc(ALLOC_ZERO);
+		if (pg_info == 0)
+			return NULL;
+		++pg_info->pp_ref;
+		physaddr_t pgpa = page2pa(pg_info);
+		// set up the pgdir to point to the new page
+		*ppde = pgpa | PTE_P | PTE_W | PTE_U;
+	}
+	// obtain the page table
+	pte_t *pgtable = (pte_t *)KADDR(PTE_ADDR(*ppde));
+	pte_t *ppte = pgtable + PTX(va);
+
+	return ppte;
 }
 
 //
@@ -345,6 +412,13 @@ static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
 	// Fill this function in
+	pte_t *ppte = pgdir_walk(pgdir, (const void*) va, true);
+	assert(ppte != NULL);
+	if (*ppte == 0) {
+		// add mapping
+		*ppte = pa | perm | PTE_P;
+	}
+	assert(PTE_ADDR(*ppte) == pa);
 }
 
 //
@@ -376,6 +450,32 @@ int
 page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
 	// Fill this function in
+	assert(pp != NULL);
+	pte_t *ppte = pgdir_walk(pgdir, va, true);
+	if (ppte == NULL)
+		return -E_NO_MEM;
+	physaddr_t pa = page2pa(pp);
+	if (*ppte != 0) {
+		physaddr_t pte_pa = PTE_ADDR(*ppte);
+		// edge case - mapping pp to the same va
+		if (pte_pa == pa) {
+			// 1st way
+			assert(pp->pp_ref > 0);
+			*ppte = pa | perm | PTE_P;
+			return 0;
+		}
+		// normal case - remove the page
+		page_remove(pgdir, va);
+		// // edge case - mapping pp to the same va
+		// if (pte_pa == pa) {
+		// 	// 2nd way
+		// 	struct PageInfo *pg_info = page_alloc(0);
+		// 	assert(pp == pg_info);
+		// }
+	}
+	++pp->pp_ref;
+	*ppte = pa | perm | PTE_P;
+
 	return 0;
 }
 
@@ -394,7 +494,14 @@ struct PageInfo *
 page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 {
 	// Fill this function in
-	return NULL;
+	pte_t *ppte = pgdir_walk(pgdir, va, false);
+	if (ppte == NULL || *ppte == 0)
+		return NULL;
+	if (pte_store != 0)
+		*pte_store = ppte;
+	// get the page info
+	struct PageInfo *pg_info = pa2page(PTE_ADDR(*ppte));
+	return pg_info;
 }
 
 //
@@ -416,6 +523,13 @@ void
 page_remove(pde_t *pgdir, void *va)
 {
 	// Fill this function in
+	pte_t *ppte = 0;
+	struct PageInfo *pg_info = page_lookup(pgdir, va, &ppte);
+	if (pg_info != NULL) {
+		page_decref(pg_info);
+		*ppte = 0;
+		tlb_invalidate(pgdir, va);
+	}
 }
 
 //
@@ -466,9 +580,10 @@ check_page_free_list(bool only_low_memory)
 
 	// if there's a page that shouldn't be on the free list,
 	// try to make sure it eventually causes trouble.
-	for (pp = page_free_list; pp; pp = pp->pp_link)
+	for (pp = page_free_list; pp; pp = pp->pp_link) {
 		if (PDX(page2pa(pp)) < pdx_limit)
 			memset(page2kva(pp), 0x97, 128);
+	}
 
 	first_free_page = (char *) boot_alloc(0);
 	for (pp = page_free_list; pp; pp = pp->pp_link) {
@@ -492,6 +607,10 @@ check_page_free_list(bool only_low_memory)
 
 	assert(nfree_basemem > 0);
 	assert(nfree_extmem > 0);
+
+	// my added assert
+	assert(nfree_basemem == IOPHYSMEM / PGSIZE - 1);
+	// assert(nfree_extmem == npages * PGSIZE - PADDR(first_free_page));
 
 	cprintf("check_page_free_list() succeeded!\n");
 }
@@ -746,7 +865,7 @@ check_page(void)
 
 	// test re-inserting pp1 at PGSIZE
 	assert(page_insert(kern_pgdir, pp1, (void*) PGSIZE, 0) == 0);
-	assert(pp1->pp_ref);
+	assert(pp1->pp_ref == 1);
 	assert(pp1->pp_link == NULL);
 
 	// unmapping pp1 at PGSIZE should free it

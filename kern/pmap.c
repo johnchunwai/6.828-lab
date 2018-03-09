@@ -124,6 +124,7 @@ boot_alloc(uint32_t n)
 //
 // From UTOP to ULIM, the user is allowed to read but not write.
 // Above ULIM the user cannot read or write.
+int a = 0;
 void
 mem_init(void)
 {
@@ -157,7 +158,8 @@ mem_init(void)
 	// array.  'npages' is the number of physical pages in memory.  Use memset
 	// to initialize all fields of each struct PageInfo to 0.
 	// Your code goes here:
-	pages = (struct PageInfo *) boot_alloc(sizeof(struct PageInfo) * npages);
+	size_t pages_size = npages * sizeof(struct PageInfo);
+	pages = (struct PageInfo *) boot_alloc(pages_size);
 	memset(pages, 0, sizeof(struct PageInfo) * npages);
 
 	//////////////////////////////////////////////////////////////////////
@@ -182,6 +184,7 @@ mem_init(void)
 	//      (ie. perm = PTE_U | PTE_P)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
+	boot_map_region(kern_pgdir, UPAGES, ROUNDUP(pages_size, PGSIZE), PADDR(pages), PTE_U);
 
 	//////////////////////////////////////////////////////////////////////
 	// Use the physical memory that 'bootstack' refers to as the kernel
@@ -194,6 +197,32 @@ mem_init(void)
 	//       overwrite memory.  Known as a "guard page".
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
+	assert(PTSIZE % (KSTKSIZE + KSTKGAP) == 0);
+	uintptr_t kstk_va = KSTACKTOP - PTSIZE;
+	// no need to check wrap around as KSTACKTOP + KSTKGAP + KSTKSIZE will not wrap yet.
+	// same for the for loop below
+	while (kstk_va < KSTACKTOP) {
+		// make sure the kernel overflow stack is not allocated
+		uintptr_t kgap_end = kstk_va + KSTKGAP;
+		for (; kstk_va < kgap_end; kstk_va += PGSIZE) {
+			page_remove(kern_pgdir, (void *) kstk_va);
+		}
+		// map the page backed region
+		uintptr_t kstk_end = kstk_va + KSTKSIZE;
+		for (; kstk_va < kstk_end; kstk_va += PGSIZE) {
+			struct PageInfo *pp = page_alloc(0);
+			if (pp == NULL)
+				panic("Out of memory while allocating kernel stack at 0x%08x", kstk_va);
+			int piresult = page_insert(kern_pgdir, pp, (void *) kstk_va, PTE_W);
+			assert(piresult == 0);
+			// boot_map_region(kern_pgdir, kstk_va, PGSIZE, page2pa(pp), PTE_W);
+			if (kstk_va > 0xefff0000) {
+				a++;
+				assert(a > 0);
+			}
+		}
+	}
+
 
 	//////////////////////////////////////////////////////////////////////
 	// Map all of physical memory at KERNBASE.
@@ -203,6 +232,7 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
+	boot_map_region(kern_pgdir, KERNBASE, ~0 - KERNBASE, 0, PTE_W);
 
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
@@ -412,13 +442,20 @@ static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
 	// Fill this function in
-	pte_t *ppte = pgdir_walk(pgdir, (const void*) va, true);
-	assert(ppte != NULL);
-	if (*ppte == 0) {
-		// add mapping
-		*ppte = pa | perm | PTE_P;
+	uintptr_t va_start = va;
+	uintptr_t va_end = va + size;
+	// the va >= va_start is because the range could wrap around for unsigned arithmetic
+	while (va < va_end && va >= va_start) {
+		pte_t *ppte = pgdir_walk(pgdir, (const void*) va, true);
+		assert(ppte != NULL);
+		if (*ppte == 0) {
+			// add mapping
+			*ppte = pa | perm | PTE_P;
+		}
+		assert(PTE_ADDR(*ppte) == pa);
+		va += PGSIZE;
+		pa += PGSIZE;
 	}
-	assert(PTE_ADDR(*ppte) == pa);
 }
 
 //
@@ -720,8 +757,11 @@ check_kern_pgdir(void)
 		assert(check_va2pa(pgdir, KERNBASE + i) == i);
 
 	// check kernel stack
-	for (i = 0; i < KSTKSIZE; i += PGSIZE)
+	for (i = 0; i < KSTKSIZE; i += PGSIZE) {
+		physaddr_t mypa1 = check_va2pa(pgdir, KSTACKTOP - KSTKSIZE + i);
+		physaddr_t mypa2 = PADDR(bootstack) + i;
 		assert(check_va2pa(pgdir, KSTACKTOP - KSTKSIZE + i) == PADDR(bootstack) + i);
+	}
 	assert(check_va2pa(pgdir, KSTACKTOP - PTSIZE) == ~0);
 
 	// check PDE permissions

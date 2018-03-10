@@ -69,6 +69,10 @@ static physaddr_t check_va2pa(pde_t *pgdir, uintptr_t va);
 static void check_page(void);
 static void check_page_installed_pgdir(void);
 
+// I added this one
+static void boot_map_invalid_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm);
+
+
 // This simple physical memory allocator is used only while JOS is setting
 // up its virtual memory system.  page_alloc() is the real allocator.
 //
@@ -184,6 +188,9 @@ mem_init(void)
 	//      (ie. perm = PTE_U | PTE_P)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
+
+	// Note that the pages are alloc'ed by bootalloc and the pa region for pages are not
+	// in free page list. So, this is safe.
 	boot_map_region(kern_pgdir, UPAGES, ROUNDUP(pages_size, PGSIZE), PADDR(pages), PTE_U);
 
 	//////////////////////////////////////////////////////////////////////
@@ -197,31 +204,44 @@ mem_init(void)
 	//       overwrite memory.  Known as a "guard page".
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
-	assert(PTSIZE % (KSTKSIZE + KSTKGAP) == 0);
-	uintptr_t kstk_va = KSTACKTOP - PTSIZE;
+
+	// Note that when doing page_init(), we already marked 
+	// cprintf("bootstack=0x%08x, bootstacktop=0x%08x\n", bootstack, bootstacktop);
+	// struct PageInfo *ppbootstack = pa2page(PADDR(bootstack));
+	// struct PageInfo *ppbootstacktop = pa2page(PADDR(bootstacktop));
+	// cprintf("ppbootstack=0x%08x, ppbootstacktop=0x%08x\n", ppbootstack, ppbootstacktop);
+	// assert(PTSIZE % (KSTKSIZE + KSTKGAP) == 0);
+	// uintptr_t kstk_va = KSTACKTOP - PTSIZE;
 	// no need to check wrap around as KSTACKTOP + KSTKGAP + KSTKSIZE will not wrap yet.
 	// same for the for loop below
-	while (kstk_va < KSTACKTOP) {
-		// make sure the kernel overflow stack is not allocated
-		uintptr_t kgap_end = kstk_va + KSTKGAP;
-		for (; kstk_va < kgap_end; kstk_va += PGSIZE) {
-			page_remove(kern_pgdir, (void *) kstk_va);
-		}
-		// map the page backed region
-		uintptr_t kstk_end = kstk_va + KSTKSIZE;
-		for (; kstk_va < kstk_end; kstk_va += PGSIZE) {
-			struct PageInfo *pp = page_alloc(0);
-			if (pp == NULL)
-				panic("Out of memory while allocating kernel stack at 0x%08x", kstk_va);
-			int piresult = page_insert(kern_pgdir, pp, (void *) kstk_va, PTE_W);
-			assert(piresult == 0);
-			// boot_map_region(kern_pgdir, kstk_va, PGSIZE, page2pa(pp), PTE_W);
-			if (kstk_va > 0xefff0000) {
-				a++;
-				assert(a > 0);
-			}
-		}
-	}
+
+	// Note: bootstack and bootstacktop's physical addr are below the initial nextfree from bootalloc()
+	// just simply map a single kernel stack [bootstack, bootstacktop) to pa[kstacktop - kstksize, kstacktop)
+	assert(PADDR(bootstacktop) - PADDR(bootstack) == KSTKSIZE);
+	boot_map_region(kern_pgdir, KSTACKTOP - KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W);
+	boot_map_invalid_region(kern_pgdir, KSTACKTOP - PTSIZE, PTSIZE - KSTKSIZE, 0, 0);
+
+	// while (kstk_va < KSTACKTOP) {
+	// 	// make sure the kernel overflow stack is not allocated
+	// 	uintptr_t kgap_end = kstk_va + KSTKGAP;
+	// 	for (; kstk_va < kgap_end; kstk_va += PGSIZE) {
+	// 		page_remove(kern_pgdir, (void *) kstk_va);
+	// 	}
+	// 	// map the page backed region
+	// 	uintptr_t kstk_end = kstk_va + KSTKSIZE;
+	// 	for (; kstk_va < kstk_end; kstk_va += PGSIZE) {
+	// 		struct PageInfo *pp = page_alloc(0);
+	// 		if (pp == NULL)
+	// 			panic("Out of memory while allocating kernel stack at 0x%08x", kstk_va);
+	// 		int piresult = page_insert(kern_pgdir, pp, (void *) kstk_va, PTE_W);
+	// 		assert(piresult == 0);
+	// 		// boot_map_region(kern_pgdir, kstk_va, PGSIZE, page2pa(pp), PTE_W);
+	// 		if (kstk_va > 0xefff0000) {
+	// 			a++;
+	// 			assert(a > 0);
+	// 		}
+	// 	}
+	// }
 
 
 	//////////////////////////////////////////////////////////////////////
@@ -291,21 +311,33 @@ page_init(void)
 	// Change the code to reflect this.
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
-	size_t i;
-	// preserver 1st page for real-mode IDT and BIOS
-	pages[0].pp_ref = 1;
 
-	for (i = 1; i < npages; i++) {
+	// Note: the page directory and the pages are already bootalloc'ed. And we're not
+	// adding pages lower than nextfree to free page list. So, we're fine.
+	size_t i;
+
+	for (i = 0; i < npages; i++) {
 		physaddr_t pa, pa_nextfree;
 		pa = page2pa(&pages[i]);
 		assert(pa == i * PGSIZE);
 		pa_nextfree = PADDR(boot_alloc(0));
+		// cprintf("pa_nextfree=0x%08x\n", pa_nextfree);
 
-		if (pa >= IOPHYSMEM && pa < EXTPHYSMEM) {
+		if (pa == 0) {// || pa == KERNBASE) {
+			// preserver 1st page for real-mode IDT and BIOS
+			//pages[0].pp_ref = 1;
+			// also need to leave a hole in the corresponding kernel mem to avoid
+			// allocating and deallocating the pages to the corresponding physical memory hole.
+		}
+		else if (pa >= IOPHYSMEM && pa < EXTPHYSMEM) {
 			// IO hole must never be allocated
 			// kernel pages are never released. So, setting ref is optional.
 			// pages[i].pp_ref = 1;
 		}
+		// else if (pa >= KADDR(IOPHYSMEM) && pa < KADDR(EXTPHYSMEM)) {
+		// 	// also need to leave a hole in the corresponding kernel mem to avoid
+		// 	// allocating and deallocating the pages to the corresponding physical memory hole.
+		// }
 		else if (pa >= EXTPHYSMEM && pa < pa_nextfree) {
 			// kernel actually starts at EXTPHYSMEM == PADDR((void*)0xF0100000)
 			assert(PADDR((void*)0xF0100000) == EXTPHYSMEM);
@@ -313,6 +345,13 @@ page_init(void)
 			// kernel pages are never released. So, setting ref is optional.
 			// pages[i].pp_ref = 1;
 		}
+		// else if (mem mapped io zone) {
+		// 	// may need to leave a hole for Memory-mapped I/O??
+		// }
+		// else if (pa >= PADDR(bootstack) && pa < PADDR(bootstacktop)) {
+		// 	// leave another hole for kernel stack
+		// 	// this is already below nextfree so we should not need to do this
+		// }
 		else {
 			pages[i].pp_ref = 0;
 			pages[i].pp_link = page_free_list;
@@ -333,6 +372,7 @@ page_init(void)
 // Returns NULL if out of free memory.
 //
 // Hint: use page2kva and memset
+int oo = 0;
 struct PageInfo *
 page_alloc(int alloc_flags)
 {
@@ -347,6 +387,10 @@ page_alloc(int alloc_flags)
 
 	if (alloc_flags & ALLOC_ZERO)
 		memset(page2kva(pp), 0, PGSIZE);
+
+	if ((uintptr_t)pp == 0xf0119868) {
+		oo++;
+	}
 
 	return pp;
 }
@@ -458,6 +502,26 @@ boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm
 	}
 }
 
+static void
+boot_map_invalid_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
+{
+	// Fill this function in
+	uintptr_t va_start = va;
+	uintptr_t va_end = va + size;
+	// the va >= va_start is because the range could wrap around for unsigned arithmetic
+	while (va < va_end && va >= va_start) {
+		pte_t *ppte = pgdir_walk(pgdir, (const void*) va, true);
+		assert(ppte != NULL);
+		if (*ppte == 0) {
+			// add mapping
+			*ppte = (pa | perm) & ~PTE_P;
+		}
+		assert((*ppte & PTE_P) == 0);
+		va += PGSIZE;
+		pa += PGSIZE;
+	}
+}
+
 //
 // Map the physical page 'pp' at virtual address 'va'.
 // The permissions (the low 12 bits) of the page table entry
@@ -488,6 +552,7 @@ page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
 	// Fill this function in
 	assert(pp != NULL);
+	assert(pp->pp_link == NULL);
 	pte_t *ppte = pgdir_walk(pgdir, va, true);
 	if (ppte == NULL)
 		return -E_NO_MEM;

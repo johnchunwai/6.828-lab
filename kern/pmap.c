@@ -69,10 +69,6 @@ static physaddr_t check_va2pa(pde_t *pgdir, uintptr_t va);
 static void check_page(void);
 static void check_page_installed_pgdir(void);
 
-// I added this one
-static void boot_map_invalid_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm);
-
-
 // This simple physical memory allocator is used only while JOS is setting
 // up its virtual memory system.  page_alloc() is the real allocator.
 //
@@ -191,7 +187,7 @@ mem_init(void)
 
 	// Note that the pages are alloc'ed by bootalloc and the pa region for pages are not
 	// in free page list. So, this is safe.
-	boot_map_region(kern_pgdir, UPAGES, ROUNDUP(pages_size, PGSIZE), PADDR(pages), PTE_U);
+	boot_map_region(kern_pgdir, UPAGES, ROUNDUP(pages_size, PGSIZE), PADDR(pages), PTE_U | PTE_P);
 
 	//////////////////////////////////////////////////////////////////////
 	// Use the physical memory that 'bootstack' refers to as the kernel
@@ -218,8 +214,8 @@ mem_init(void)
 	// Note: bootstack and bootstacktop's physical addr are below the initial nextfree from bootalloc()
 	// just simply map a single kernel stack [bootstack, bootstacktop) to pa[kstacktop - kstksize, kstacktop)
 	assert(PADDR(bootstacktop) - PADDR(bootstack) == KSTKSIZE);
-	boot_map_region(kern_pgdir, KSTACKTOP - KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W);
-	boot_map_invalid_region(kern_pgdir, KSTACKTOP - PTSIZE, PTSIZE - KSTKSIZE, 0, 0);
+	boot_map_region(kern_pgdir, KSTACKTOP - KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W | PTE_P);
+	boot_map_region(kern_pgdir, KSTACKTOP - PTSIZE, PTSIZE - KSTKSIZE, 0, 0);
 
 	// while (kstk_va < KSTACKTOP) {
 	// 	// make sure the kernel overflow stack is not allocated
@@ -252,7 +248,7 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
-	boot_map_region(kern_pgdir, KERNBASE, ~0 - KERNBASE, 0, PTE_W);
+	boot_map_region(kern_pgdir, KERNBASE, ~0 - KERNBASE, 0, PTE_W | PTE_P);
 
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
@@ -494,29 +490,9 @@ boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm
 		assert(ppte != NULL);
 		if (*ppte == 0) {
 			// add mapping
-			*ppte = pa | perm | PTE_P;
+			*ppte = pa | perm;
 		}
 		assert(PTE_ADDR(*ppte) == pa);
-		va += PGSIZE;
-		pa += PGSIZE;
-	}
-}
-
-static void
-boot_map_invalid_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
-{
-	// Fill this function in
-	uintptr_t va_start = va;
-	uintptr_t va_end = va + size;
-	// the va >= va_start is because the range could wrap around for unsigned arithmetic
-	while (va < va_end && va >= va_start) {
-		pte_t *ppte = pgdir_walk(pgdir, (const void*) va, true);
-		assert(ppte != NULL);
-		if (*ppte == 0) {
-			// add mapping
-			*ppte = (pa | perm) & ~PTE_P;
-		}
-		assert((*ppte & PTE_P) == 0);
 		va += PGSIZE;
 		pa += PGSIZE;
 	}

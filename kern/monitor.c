@@ -10,8 +10,17 @@
 #include <kern/console.h>
 #include <kern/monitor.h>
 #include <kern/kdebug.h>
+#include <kern/pmap.h>
 
 #define CMDBUF_SIZE	80	// enough for one VGA text line
+#define PERMBUF_SIZE 20	// enough for storing permission flags
+
+
+// declaration
+static int check_addr_range(uint32_t startaddr, uint32_t endaddr);
+static void parse_perm(char * output, pte_t pte);
+static void do_showmappings(uintptr_t startva, uintptr_t endva);
+static void do_dumpva(uintptr_t startva, uintptr_t endva);
 
 
 struct Command {
@@ -21,9 +30,31 @@ struct Command {
 	int (*func)(int argc, char** argv, struct Trapframe* tf);
 };
 
+struct Perm {
+	const char *name;
+	uint32_t val;
+};
+
 static struct Command commands[] = {
 	{ "help", "Display this list of commands", mon_help },
 	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
+	{ "sm", "Display physical mappings and permission bits for VA range (eg. 0x3000, 0x6000)", mon_showmappings },
+	{ "mem", "Display general mem info", mon_meminfo },
+	{ "setperm", "Set permission to a va page (eg. addperm permname val(1/0) vastart vaend)", mon_setperm},
+	{ "dumpva", "Dump mem for va range", mon_dumpva},
+	{ "dumppa", "Dump mem for pa range", mon_dumppa},
+};
+
+static struct Perm perms[] = {
+	{ "PTE_P", 0x001 },
+	{ "PTE_W", 0x002 },
+	{ "PTE_U", 0x004 },
+	{ "PTE_PWT", 0x008 },
+	{ "PTE_PCD", 0x010 },
+	{ "PTE_A", 0x020 },
+	{ "PTE_D", 0x040 },
+	{ "PTE_PS", 0x080 },
+	{ "PTE_G", 0x100 }
 };
 
 /***** Implementations of basic kernel monitor commands *****/
@@ -52,6 +83,232 @@ mon_kerninfo(int argc, char **argv, struct Trapframe *tf)
 	cprintf("Kernel executable memory footprint: %dKB\n",
 		ROUNDUP(end - entry, 1024) / 1024);
 	return 0;
+}
+
+int
+check_addr_range(uint32_t startaddr, uint32_t endaddr)
+{
+	if (endaddr <= startaddr) {
+		cprintf("Invalid range - endaddr must be > startaddr\n");
+		return -1;
+	}
+	return 0;
+}
+
+
+int
+mon_dumppa(int argc, char **argv, struct Trapframe *tf)
+{
+	if (argc != 3) {
+		cprintf("Usage: dumppa start_pa end_pa (exclusive)\n");
+		return -1;
+	}
+
+	physaddr_t startpa = (physaddr_t) strtol(argv[1], NULL, 16);
+	physaddr_t endpa = (physaddr_t) strtol(argv[2], NULL, 16);
+
+	if (0 != check_addr_range(startpa, endpa))
+		return -1;
+
+	cprintf("Dumping physical mem [0x%08x, 0x%08x)\n", startpa, endpa);
+	// for (physaddr_t pa = startpa; pa < endpa; ) {
+	// 	struct PageInfo *pp = pa2page(pa);
+	// 	if (pp->pp_link == null) {
+	// 		// page is free. dump no content
+	// 		//....
+	// 	}
+	// 	else {
+	// 		// page is not free but it might be reserved as holes
+	// 		// 
+	// 	}
+	do_dumpva((uintptr_t) KADDR(startpa), (uintptr_t) KADDR(endpa));
+
+	return 0;
+}
+
+int
+mon_dumpva(int argc, char **argv, struct Trapframe *tf)
+{
+	if (argc != 3) {
+		cprintf("Usage: dumpva start_va end_va (exclusive)\n");
+		return -1;
+	}
+
+	uintptr_t startva = (uintptr_t) strtol(argv[1], NULL, 16);
+	uintptr_t endva = (uintptr_t) strtol(argv[2], NULL, 16);
+
+	if (0 != check_addr_range(startva, endva))
+		return -1;
+
+	cprintf("Dumping virt mem [0x%08x, 0x%08x)\n", startva, endva);
+	do_dumpva(startva, endva);
+
+	return 0;
+}
+
+void
+do_dumpva(uintptr_t startva, uintptr_t endva)
+{
+	// FixThis!!! fix the case if page is not valid
+	// dump 4 x 4 per row
+	int count = 0;
+	for (uintptr_t va = startva; va < endva; ) {
+		// check if page exists
+		uintptr_t pgend = ROUNDUP(va, PGSIZE);
+		if (pgend == va)
+			pgend += PGSIZE;
+		pgend = MIN(pgend, endva);
+		struct PageInfo *pp = page_lookup(kern_pgdir, (void *) va, NULL);
+		while (va < pgend) {
+			if (count % 16 == 0)
+				cprintf("0x%08x    ", va);
+			else if (count % 4 == 0)
+				cprintf(" ");
+
+			if (pp == NULL)
+				cprintf("--");
+			else
+				cprintf("%02x", *(uint8_t *) va);
+
+			if (count % 16 == 15)
+				cprintf("\n");
+			++va;
+			++count;
+		}
+	}
+	cprintf("\n");
+}
+
+int
+mon_setperm(int argc, char **argv, struct Trapframe *tf)
+{
+	if (argc != 5) {
+		cprintf("Usage: setperm permname val(1/0) start_va end_va (exclusive)\n");
+		return -1;
+	}
+
+	uint32_t perm = ~0;
+	for (int i = 0; i < ARRAY_SIZE(perms); i++) {
+		if (strcmp(argv[1], perms[i].name) == 0)
+			perm = perms[i].val;
+	}
+	if (perm == ~0) {
+		cprintf("Unknown permname '%s'\n", argv[1]);
+		return -1;
+	}
+	uint32_t permval = (uint32_t) strtol(argv[2], NULL, 10);
+	if (permval > 1) {
+		cprintf("Invalid permval %s. Acceptable vals are 0 or 1\n", argv[2]);
+		return -1;
+	}
+	
+	uintptr_t startva = (uintptr_t) strtol(argv[3], NULL, 16);
+	uintptr_t endva = (uintptr_t) strtol(argv[4], NULL, 16);
+
+	if (0 != check_addr_range(startva, endva))
+		return -1;
+
+	endva += (PGSIZE - 1);
+
+	cprintf("Original mappings\n:");
+	do_showmappings(startva, endva);
+
+	for (uintptr_t va = startva; va < endva; va += PGSIZE) {
+		pte_t * ppte = pgdir_walk(kern_pgdir, (void *) va, false);
+		if (ppte != NULL) {
+			if (permval == 0)
+				*ppte &= ~perm;
+			else
+				*ppte |= perm;
+		}
+	}
+
+	cprintf("Updated mappings\n:");
+	do_showmappings(startva, endva);
+
+	return 0;
+}
+
+int
+mon_meminfo(int argc, char **argv, struct Trapframe *tf)
+{
+	mon_kerninfo(0, NULL, tf);
+
+	size_t pages_size = npages * sizeof(struct PageInfo);
+	cprintf("\nnpages=0x%08x, page info size=0x%08x, roundup=0x%08x\n", npages, pages_size, ROUNDUP(pages_size, PGSIZE));
+	cprintf("kern_pgdir @0x%08x, pages @0x%08x\n", (uintptr_t) kern_pgdir, (uintptr_t) pages);
+	cprintf("KERNBASE=0x%08x, KSTACKTOP=KERNBASE, 1st kernel stack=0x%08x, KSTACKTOP - PTSIZE=0x%08x\n",
+		KERNBASE, KSTACKTOP - KSTKSIZE, KSTACKTOP - PTSIZE);
+	cprintf("UPAGES=0x%08x, UPAGES_END(UPAGES+pageinfo_size)=0x%08x, UVPT(UPAGES+PTSIZE)=0x%08x\n",
+		UPAGES, UPAGES + pages_size, UVPT);
+	cprintf("UVPT(curr pg table)=0x%08x, ULIM=0x%08x\n", UVPT, ULIM);
+	cprintf("MMIOBASE(mmap IO)=0x%08x, MMIOLIM=0x%08x\n", MMIOBASE, MMIOLIM);
+
+	return 0;
+}
+
+int
+mon_showmappings(int argc, char **argv, struct Trapframe *tf)
+{
+	if (argc != 3) {
+		cprintf("Usage: showmappings start_va end_va (exclusive)\n");
+		return -1;
+	}
+
+	uintptr_t startva = (uintptr_t) strtol(argv[1], NULL, 16);
+	uintptr_t endva = (uintptr_t) strtol(argv[2], NULL, 16);
+
+	if (0 != check_addr_range(startva, endva))
+		return -1;
+
+	endva += (PGSIZE - 1);
+
+	do_showmappings(startva, endva);
+
+	return 0;
+}
+
+void do_showmappings(uintptr_t startva, uintptr_t endva)
+{
+	cprintf("Show mappings for VA [0x%08x, 0x%08x]\n", startva, endva);
+	cprintf("\n%-10s | %-10s | %s\n", "VA", "PA", "PERMS (present|R/W|U/S|WriteThru|CacheEnabled|Accessed|Dirty|PS|Global)");
+
+	for (uintptr_t va = startva; va < endva; va += PGSIZE) {
+		pte_t * ppte = pgdir_walk(kern_pgdir, (void *) va, false);
+		if (ppte == NULL) {
+			cprintf("0x%08x | %-10s | %s\n", va, "NA", "NA");
+		}
+		else {
+			physaddr_t pa = PTE_ADDR(*ppte);
+			char perm[PERMBUF_SIZE];
+			parse_perm(perm, *ppte);
+			cprintf("0x%08x | 0x%08x | %s\n", va, pa, perm);
+		}
+	}
+}
+
+void
+parse_perm(char * output, pte_t pte)
+{
+	strcpy(output, "-|R|S|-|T|-|-|4k|-");
+	if (pte & PTE_P)
+		output[0] = 'P';
+	if (pte & PTE_W)
+		output[2] = 'W';
+	if (pte & PTE_U)
+		output[4] = 'U';
+	if (pte & PTE_PWT)
+		output[6] = 'T';
+	if (pte & PTE_PCD)
+		output[8] = '-';
+	if (pte & PTE_A)
+		output[10] = 'A';
+	if (pte & PTE_D)
+		output[12] = 'D';
+	if (pte & PTE_PS)
+		output[15] = 'M';
+	if (pte & PTE_G)
+		output[17] = 'G';
 }
 
 int

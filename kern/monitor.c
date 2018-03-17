@@ -149,7 +149,7 @@ mon_dumpva(int argc, char **argv, struct Trapframe *tf)
 void
 do_dumpva(uintptr_t startva, uintptr_t endva)
 {
-	// FixThis!!! fix the case if page is not valid
+	cprintf("--: no mapping/!PTE_P, HH: hole, FF: free\n");
 	// dump 4 x 4 per row
 	int count = 0;
 	for (uintptr_t va = startva; va < endva; ) {
@@ -165,8 +165,18 @@ do_dumpva(uintptr_t startva, uintptr_t endva)
 			else if (count % 4 == 0)
 				cprintf(" ");
 
-			if (pp == NULL)
+			if (pp == NULL) {
+				// no mapping or not PTE_P
 				cprintf("--");
+			}
+			else if (pp->pp_link != NULL) {
+				// free pages
+				cprintf("FF");
+			}
+			else if (pp->pp_ref == 0) {
+				// mem hole
+				cprintf("HH");
+			}
 			else
 				cprintf("%02x", *(uint8_t *) va);
 

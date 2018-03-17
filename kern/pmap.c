@@ -319,6 +319,11 @@ page_init(void)
 		pa_nextfree = PADDR(boot_alloc(0));
 		// cprintf("pa_nextfree=0x%08x\n", pa_nextfree);
 
+		//
+		// hole: pp_ref = 0
+		// kernel alloc: pp_ref = 1
+		//
+
 		if (pa == 0) {// || pa == KERNBASE) {
 			// preserver 1st page for real-mode IDT and BIOS
 			//pages[0].pp_ref = 1;
@@ -330,24 +335,25 @@ page_init(void)
 			// kernel pages are never released. So, setting ref is optional.
 			// pages[i].pp_ref = 1;
 		}
-		// else if (pa >= KADDR(IOPHYSMEM) && pa < KADDR(EXTPHYSMEM)) {
-		// 	// also need to leave a hole in the corresponding kernel mem to avoid
-		// 	// allocating and deallocating the pages to the corresponding physical memory hole.
-		// }
 		else if (pa >= EXTPHYSMEM && pa < pa_nextfree) {
 			// kernel actually starts at EXTPHYSMEM == PADDR((void*)0xF0100000)
 			assert(PADDR((void*)0xF0100000) == EXTPHYSMEM);
 			// start of kernel until the nextfree is allocated already
-			// kernel pages are never released. So, setting ref is optional.
-			// pages[i].pp_ref = 1;
+			// kernel pages are never released. So, setting ref is optional
+			// but we'll set it to denote that it's kernel used space, not a
+			// hole.
+			pages[i].pp_ref = 1;
 		}
 		// else if (mem mapped io zone) {
 		// 	// may need to leave a hole for Memory-mapped I/O??
+		//	// but we can't support that much mem, so this is out of range
 		// }
-		// else if (pa >= PADDR(bootstack) && pa < PADDR(bootstacktop)) {
-		// 	// leave another hole for kernel stack
-		// 	// this is already below nextfree so we should not need to do this
-		// }
+		else if (pa >= PADDR(bootstack) + KSTKSIZE - PTSIZE && pa < PADDR(bootstacktop)) {
+			// reserve mem for kernel stack
+			// this is already below nextfree so we should not need to do this
+			assert((uintptr_t) bootstacktop == KSTACKTOP);
+			pages[i].pp_ref = 1;
+		}
 		else {
 			pages[i].pp_ref = 0;
 			pages[i].pp_link = page_free_list;

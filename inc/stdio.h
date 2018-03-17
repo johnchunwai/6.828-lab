@@ -11,6 +11,10 @@
 #define RED '\xdd'
 #define YELLOW '\xde'
 #define CYAN '\xdf'
+#define WHITE_S "\xdc"
+#define RED_S "\xdd"
+#define YELLOW_S "\xde"
+#define CYAN_S "\xdf"
 
 // lib/console.c
 void	cputchar(int c);

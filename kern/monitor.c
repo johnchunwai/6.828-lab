@@ -149,7 +149,8 @@ mon_dumpva(int argc, char **argv, struct Trapframe *tf)
 void
 do_dumpva(uintptr_t startva, uintptr_t endva)
 {
-	cprintf("--: no mapping/!PTE_P, HH: hole, FF: free\n");
+	cprintf(RED_S"--"WHITE_S": no mapping/!PTE_P, "
+		CYAN_S"HH"WHITE_S": mem hole, "YELLOW_S"FF"WHITE_S": free"WHITE_S"\n");
 	// dump 4 x 4 per row
 	int count = 0;
 	for (uintptr_t va = startva; va < endva; ) {
@@ -167,26 +168,26 @@ do_dumpva(uintptr_t startva, uintptr_t endva)
 
 			if (pp == NULL) {
 				// no mapping or not PTE_P
-				cprintf("--");
+				cprintf(RED_S"--");
 			}
 			else if (pp->pp_link != NULL) {
 				// free pages
-				cprintf("FF");
+				cprintf(YELLOW_S"FF");
 			}
 			else if (pp->pp_ref == 0) {
 				// mem hole
-				cprintf("HH");
+				cprintf(CYAN_S"HH");
 			}
 			else
-				cprintf("%02x", *(uint8_t *) va);
+				cprintf(WHITE_S"%02x", *(uint8_t *) va);
 
 			if (count % 16 == 15)
-				cprintf("\n");
+				cprintf(WHITE_S"\n");
 			++va;
 			++count;
 		}
 	}
-	cprintf("\n");
+	cprintf(WHITE_S"\n");
 }
 
 int

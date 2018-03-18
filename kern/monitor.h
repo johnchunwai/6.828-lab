@@ -21,5 +21,6 @@ int mon_meminfo(int argc, char **argv, struct Trapframe *tf);
 int mon_setperm(int argc, char **argv, struct Trapframe *tf);
 int mon_dumpva(int argc, char **argv, struct Trapframe *tf);
 int mon_dumppa(int argc, char **argv, struct Trapframe *tf);
+int mon_freepginfo(int argc, char **argv, struct Trapframe *tf);
 
 #endif	// !JOS_KERN_MONITOR_H

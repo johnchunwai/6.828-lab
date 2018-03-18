@@ -9,6 +9,37 @@
 #include <kern/pmap.h>
 #include <kern/kclock.h>
 
+//
+// Supporting mixed 4MB and 4KB pages
+// ----------------------------------
+//
+// We'll keep track of 2 page free lists. One for 4k pages and one for 4m
+// ones.
+//
+// Alloc:
+// * if the size needed is >4k:
+// ** we'll find a free slot in the 4m free list
+// ** if empty, fail the request (fragmentation)
+// * if size is <= 4k:
+// ** we'll find a free slot in the 4k free list
+// ** if empty, we'll find a free slot from 4m free list
+// *** if emtpy, fail the request (out of mem)
+// *** if not empty, remove four 4k pages from the 4m free list and
+//     add three of those to the 4k free list. One of them is for alloc.
+//
+// Free
+// * if page size is 4m, return the four 4k pages to 4m free list
+// * if page size is <= 4k
+// ** if page is 4m aligned
+// *** if the next three pages are free (ref_link != null)
+// **** add the page to 4m free list
+// **** move the next three pages from 4k free list to 4m free list
+// *** if any of the next three pages are not free
+// **** return the page to 4k free list
+// ** if page is not 4m aligned
+// *** return the page to 4k free list
+//
+
 // These variables are set by i386_detect_memory()
 size_t npages;			// Amount of physical memory (in pages)
 static size_t npages_basemem;	// Amount of base memory (in pages)
@@ -16,8 +47,19 @@ static size_t npages_basemem;	// Amount of base memory (in pages)
 // These variables are set in mem_init()
 pde_t *kern_pgdir;		// Kernel's initial page directory
 struct PageInfo *pages;		// Physical page state array
-static struct PageInfo *page_free_list;	// Free list of physical pages
+struct PageInfo *page_free_list;	// Free list of physical pages
+struct PageInfo *spage_free_list;	// Free list of 4MB pages
+static bool has_pse;
 
+static bool mem_intersected(uint32_t startaddr1, uint32_t endaddr1,
+	uint32_t startaddr2, uint32_t endaddr2);
+
+bool mem_intersected(uint32_t startaddr1, uint32_t endaddr1,
+	uint32_t startaddr2, uint32_t endaddr2)
+{
+	bool intersect = endaddr2 > startaddr1 && endaddr1 > startaddr2;
+	return intersect;
+}
 
 // --------------------------------------------------------------
 // Detect machine's physical memory setup.
@@ -130,6 +172,15 @@ mem_init(void)
 {
 	uint32_t cr0;
 	size_t n;
+
+	// Check for 4MB page size is supported
+	uint32_t edx;
+	cpuid(0x1, NULL, NULL, NULL, &edx);
+	has_pse = edx & CPUID_PSE;
+	if (has_pse)
+		cprintf("4MB pages supported\n");
+	else
+		cprintf("No 4MB page support\n");
 
 	// Find out how much memory the machine has (npages & npages_basemem).
 	i386_detect_memory();
@@ -308,15 +359,21 @@ page_init(void)
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
 
-	// Note: the page directory and the pages are already bootalloc'ed. And we're not
-	// adding pages lower than nextfree to free page list. So, we're fine.
-	size_t i;
-
-	for (i = 0; i < npages; i++) {
+	for (physaddr_t i = 0; i < npages; ) {
 		physaddr_t pa, pa_nextfree;
 		pa = page2pa(&pages[i]);
 		assert(pa == i * PGSIZE);
 		pa_nextfree = PADDR(boot_alloc(0));
+		bool spage_aligned = ((pa & (SPGSIZE - 1)) == 0);
+		// if this is a superpage
+		bool is_spage = has_pse && spage_aligned && ((i + PG_PER_SPG) < npages);
+		if (pa == 0 ||
+			mem_intersected(IOPHYSMEM, EXTPHYSMEM, pa, pa + SPGSIZE) ||
+			mem_intersected(EXTPHYSMEM,	pa_nextfree, pa, pa + SPGSIZE) ||
+			mem_intersected(PADDR(bootstack) + KSTKSIZE,
+					PADDR((void *) KSTACKTOP), pa, pa + SPGSIZE))
+			is_spage = false;
+	
 		// cprintf("pa_nextfree=0x%08x\n", pa_nextfree);
 
 		//
@@ -348,17 +405,27 @@ page_init(void)
 		// 	// may need to leave a hole for Memory-mapped I/O??
 		//	// but we can't support that much mem, so this is out of range
 		// }
-		else if (pa >= PADDR(bootstack) + KSTKSIZE - PTSIZE && pa < PADDR(bootstacktop)) {
+		else if (pa >= PADDR(bootstack) + KSTKSIZE &&
+				pa < PADDR(bootstacktop)) {
 			// reserve mem for kernel stack
 			// this is already below nextfree so we should not need to do this
 			assert((uintptr_t) bootstacktop == KSTACKTOP);
 			pages[i].pp_ref = 1;
+		}
+		else if (is_spage) {
+			for (int j = 0; j < PG_PER_SPG; ++j) {
+				assert(i+j < npages);
+				pages[i+j].pp_ref = 0;
+				pages[i+j].pp_link = spage_free_list;
+				spage_free_list = &pages[i+j];
+			}
 		}
 		else {
 			pages[i].pp_ref = 0;
 			pages[i].pp_link = page_free_list;
 			page_free_list = &pages[i];
 		}
+		i += is_spage ? PG_PER_SPG : 1;
 	}
 }
 
@@ -641,7 +708,7 @@ tlb_invalidate(pde_t *pgdir, void *va)
 static void
 check_page_free_list(bool only_low_memory)
 {
-	struct PageInfo *pp;
+	struct PageInfo *pp, *spp;
 	unsigned pdx_limit = only_low_memory ? 1 : NPDENTRIES;
 	int nfree_basemem = 0, nfree_extmem = 0;
 	char *first_free_page;
@@ -670,6 +737,11 @@ check_page_free_list(bool only_low_memory)
 		if (PDX(page2pa(pp)) < pdx_limit)
 			memset(page2kva(pp), 0x97, 128);
 	}
+	for (spp = spage_free_list; spp; spp = spp->pp_link) {
+		if (PDX(page2pa(spp)) < pdx_limit)
+			memset(page2kva(spp), 0x97, 128);
+	}
+
 
 	first_free_page = (char *) boot_alloc(0);
 	for (pp = page_free_list; pp; pp = pp->pp_link) {
@@ -697,6 +769,31 @@ check_page_free_list(bool only_low_memory)
 	// my added assert
 	assert(nfree_basemem == IOPHYSMEM / PGSIZE - 1);
 	// assert(nfree_extmem == npages * PGSIZE - PADDR(first_free_page));
+
+	nfree_basemem = 0;
+	nfree_extmem = 0;
+	for (spp = spage_free_list; spp; spp = spp->pp_link) {
+		// check that we didn't corrupt the free list itself
+		assert(spp >= pages);
+		assert(spp < pages + npages);
+		assert(((char *) spp - (char *) pages) % sizeof(*spp) == 0);
+
+		// check a few pages that shouldn't be on the free list
+		assert(page2pa(spp) != 0);
+		assert(page2pa(spp) != IOPHYSMEM);
+		assert(page2pa(spp) != EXTPHYSMEM - PGSIZE);
+		assert(page2pa(spp) != EXTPHYSMEM);
+		assert(page2pa(spp) < EXTPHYSMEM || (char *) page2kva(spp) >= first_free_page);
+
+		if (page2pa(spp) < EXTPHYSMEM)
+			++nfree_basemem;
+		else
+			++nfree_extmem;
+	}
+
+	// 640k low mem is not enough to hold even 1 superpage which is 4mb
+	assert(nfree_basemem == 0);
+	assert(nfree_extmem > 0);
 
 	cprintf("check_page_free_list() succeeded!\n");
 }

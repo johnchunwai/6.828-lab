@@ -17,6 +17,9 @@
 
 
 // declaration
+extern struct PageInfo *page_free_list;
+extern struct PageInfo *spage_free_list;
+
 static int check_addr_range(uint32_t startaddr, uint32_t endaddr);
 static void parse_perm(char * output, pte_t pte);
 static void do_showmappings(uintptr_t startva, uintptr_t endva);
@@ -43,6 +46,7 @@ static struct Command commands[] = {
 	{ "setperm", "Set permission to a va page (eg. addperm permname val(1/0) vastart vaend)", mon_setperm},
 	{ "dumpva", "Dump mem for va range", mon_dumpva},
 	{ "dumppa", "Dump mem for pa range", mon_dumppa},
+	{ "freepginfo", "Show some free page info", mon_freepginfo},
 };
 
 static struct Perm perms[] = {
@@ -95,6 +99,22 @@ check_addr_range(uint32_t startaddr, uint32_t endaddr)
 	return 0;
 }
 
+int
+mon_freepginfo(int argc, char **argv, struct Trapframe *tf)
+{
+	int spgcount = 0;
+	int pgcount = 0;
+	for (struct PageInfo* pp = spage_free_list; pp; pp = pp->pp_link)
+		++spgcount;
+	for (struct PageInfo* pp = page_free_list; pp; pp = pp->pp_link)
+		++pgcount;
+	assert((spgcount % PG_PER_SPG) == 0);
+	spgcount = spgcount / PG_PER_SPG;
+	cprintf("  free superpage count %d\n", spgcount);
+	cprintf("  free page count %d\n", pgcount);
+
+	return 0;
+}
 
 int
 mon_dumppa(int argc, char **argv, struct Trapframe *tf)
@@ -247,6 +267,7 @@ mon_meminfo(int argc, char **argv, struct Trapframe *tf)
 
 	size_t pages_size = npages * sizeof(struct PageInfo);
 	cprintf("\nnpages=0x%08x, page info size=0x%08x, roundup=0x%08x\n", npages, pages_size, ROUNDUP(pages_size, PGSIZE));
+	cprintf("bootstack @0x%08x, bootstktop @0x%08x\n", PADDR(bootstack), PADDR(bootstacktop));
 	cprintf("kern_pgdir @0x%08x, pages @0x%08x\n", (uintptr_t) kern_pgdir, (uintptr_t) pages);
 	cprintf("KERNBASE=0x%08x, KSTACKTOP=KERNBASE, 1st kernel stack=0x%08x, KSTACKTOP - PTSIZE=0x%08x\n",
 		KERNBASE, KSTACKTOP - KSTKSIZE, KSTACKTOP - PTSIZE);

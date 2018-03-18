@@ -48,6 +48,11 @@
 #define PGSIZE		4096		// bytes mapped by a page
 #define PGSHIFT		12		// log2(PGSIZE)
 
+#define SPGSIZE		0x400000	// superpage (4MB) page size
+#define SPGSHIFT	22			// log2(SPGSIZE) (same as PDXSHIFT)
+
+#define PG_PER_SPG	0x400	// SPGSIZE / PGSIZE
+
 #define PTSIZE		(PGSIZE*NPTENTRIES) // bytes mapped by a page directory entry
 #define PTSHIFT		22		// log2(PTSIZE)
 
@@ -95,6 +100,8 @@
 #define CR4_TSD		0x00000004	// Time Stamp Disable
 #define CR4_PVI		0x00000002	// Protected-Mode Virtual Interrupts
 #define CR4_VME		0x00000001	// V86 Mode Extensions
+
+#define CPUID_PSE	0x00000008	// whether PSE is supported
 
 // Eflags register
 #define FL_CF		0x00000001	// Carry Flag

@@ -23,6 +23,7 @@ extern struct PageInfo *spage_free_list;
 static int check_addr_range(uint32_t startaddr, uint32_t endaddr);
 static void parse_perm(char * output, pte_t pte);
 static void do_showmappings(uintptr_t startva, uintptr_t endva);
+static void do_showpdes(uintptr_t startva, uintptr_t endva);
 static void do_dumpva(uintptr_t startva, uintptr_t endva);
 
 
@@ -42,6 +43,7 @@ static struct Command commands[] = {
 	{ "help", "Display this list of commands", mon_help },
 	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
 	{ "sm", "Display physical mappings and permission bits for VA range (eg. 0x3000, 0x6000)", mon_showmappings },
+	{ "sd", "Display PDEs VA range (eg. 0x3000, 0x6000)", mon_showpdes },
 	{ "mem", "Display general mem info", mon_meminfo },
 	{ "setperm", "Set permission to a va page (eg. addperm permname val(1/0) vastart vaend)", mon_setperm},
 	{ "dumpva", "Dump mem for va range", mon_dumpva},
@@ -245,7 +247,7 @@ mon_setperm(int argc, char **argv, struct Trapframe *tf)
 	do_showmappings(startva, endva);
 
 	for (uintptr_t va = startva; va < endva; va += PGSIZE) {
-		pte_t * ppte = pgdir_walk(kern_pgdir, (void *) va, false);
+		pte_t * ppte = pgdir_walk(kern_pgdir, (void *) va, PGDIR_WALK_NO_CREATE);
 		if (ppte != NULL) {
 			if (permval == 0)
 				*ppte &= ~perm;
@@ -306,7 +308,7 @@ void do_showmappings(uintptr_t startva, uintptr_t endva)
 	cprintf("\n%-10s | %-10s | %s\n", "VA", "PA", "PERMS (present|R/W|U/S|WriteThru|CacheEnabled|Accessed|Dirty|PS|Global)");
 
 	for (uintptr_t va = startva; va < endva; va += PGSIZE) {
-		pte_t * ppte = pgdir_walk(kern_pgdir, (void *) va, false);
+		pte_t * ppte = pgdir_walk(kern_pgdir, (void *) va, PGDIR_WALK_NO_CREATE);
 		if (ppte == NULL) {
 			cprintf("0x%08x | %-10s | %s\n", va, "NA", "NA");
 		}
@@ -316,6 +318,42 @@ void do_showmappings(uintptr_t startva, uintptr_t endva)
 			parse_perm(perm, *ppte);
 			cprintf("0x%08x | 0x%08x | %s\n", va, pa, perm);
 		}
+	}
+}
+
+int
+mon_showpdes(int argc, char **argv, struct Trapframe *tf)
+{
+	if (argc != 3) {
+		cprintf("Usage: showpdes start_va end_va (exclusive)\n");
+		return -1;
+	}
+
+	uintptr_t startva = (uintptr_t) strtol(argv[1], NULL, 16);
+	uintptr_t endva = (uintptr_t) strtol(argv[2], NULL, 16);
+
+	if (0 != check_addr_range(startva, endva))
+		return -1;
+
+	do_showpdes(startva, endva);
+
+	return 0;
+}
+
+void do_showpdes(uintptr_t startva, uintptr_t endva)
+{
+	cprintf("Show PDEs for VA [0x%08x, 0x%08x]\n", startva, endva);
+	cprintf("\n%-10s | %-10s | %s\n", "VA", "PA", "PERMS (present|R/W|U/S|WriteThru|CacheEnabled|Accessed|Dirty|PS|Global)");
+	uintptr_t va = PDX(startva) << PDXSHIFT;
+	while (va < endva) {
+		pde_t *pd = kern_pgdir + PDX(va);
+		if (*pd & PTE_P) {
+			physaddr_t pa = PTE_ADDR(*pd);
+			char perm[20];
+			parse_perm(perm, *pd);
+			cprintf("0x%08x | 0x%08x | %s\n", va, pa, perm);
+		}
+		va += (1 << PDXSHIFT);
 	}
 }
 

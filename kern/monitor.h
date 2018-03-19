@@ -17,6 +17,7 @@ int mon_kerninfo(int argc, char **argv, struct Trapframe *tf);
 int asm_mon_backtrace(int argc, char **argv, struct Trapframe *tf);
 int c_mon_backtrace(int argc, char **argv, struct Trapframe *tf);
 int mon_showmappings(int argc, char **argv, struct Trapframe *tf);
+int mon_showpdes(int argc, char **argv, struct Trapframe *tf);
 int mon_meminfo(int argc, char **argv, struct Trapframe *tf);
 int mon_setperm(int argc, char **argv, struct Trapframe *tf);
 int mon_dumpva(int argc, char **argv, struct Trapframe *tf);

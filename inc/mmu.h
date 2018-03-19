@@ -78,7 +78,8 @@
 #define PTE_SYSCALL	(PTE_AVAIL | PTE_P | PTE_W | PTE_U)
 
 // Address in page table or page directory entry
-#define PTE_ADDR(pte)	((physaddr_t) (pte) & ~0xFFF)
+// Superpage will need a diff way to calculate page addr as bits [12..21] might be used for smth.
+#define PTE_ADDR(pte)	(((pte) & PTE_PS) ? (physaddr_t) (pte) & ~0x3FFFFF : (physaddr_t) (pte) & ~0xFFF)
 
 // Control Register flags
 #define CR0_PE		0x00000001	// Protection Enable

@@ -107,7 +107,7 @@ static void boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t 
 static void check_page_free_list(bool only_low_memory);
 static void check_page_alloc(void);
 static void check_kern_pgdir(void);
-static physaddr_t check_va2pa(pde_t *pgdir, uintptr_t va);
+static physaddr_t check_va2pa(pde_t *pgdir, uintptr_t va, bool *spage);
 static void check_page(void);
 static void check_page_installed_pgdir(void);
 
@@ -166,7 +166,7 @@ boot_alloc(uint32_t n)
 //
 // From UTOP to ULIM, the user is allowed to read but not write.
 // Above ULIM the user cannot read or write.
-int a = 0;
+// static void do_showmappings(uintptr_t startva, uintptr_t endva);
 void
 mem_init(void)
 {
@@ -178,7 +178,14 @@ mem_init(void)
 	cpuid(0x1, NULL, NULL, NULL, &edx);
 	has_pse = edx & CPUID_PSE;
 	if (has_pse)
+	{
 		cprintf("4MB pages supported\n");
+		// turn on superpage
+		uint32_t cr4 = rcr4();
+		cr4 |= CR4_PSE;
+		lcr4(cr4);
+		cprintf("4MB pages turned on\n");
+	}
 	else
 		cprintf("No 4MB page support\n");
 
@@ -299,7 +306,10 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
-	boot_map_region(kern_pgdir, KERNBASE, ~0 - KERNBASE, 0, PTE_W | PTE_P);
+	uint32_t perm = PTE_W | PTE_P;
+	if (has_pse)
+		perm |= PTE_PS;
+	boot_map_region(kern_pgdir, KERNBASE, ~0 - KERNBASE, 0, perm);
 
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
@@ -311,6 +321,7 @@ mem_init(void)
 	//
 	// If the machine reboots at this point, you've probably set up your
 	// kern_pgdir wrong.
+	// do_showmappings(0x0, 0xffffffff);
 	lcr3(PADDR(kern_pgdir));
 
 	check_page_free_list(0);
@@ -325,6 +336,45 @@ mem_init(void)
 	// Some more checks, only possible after kern_pgdir is installed.
 	check_page_installed_pgdir();
 }
+// static void parse_perm(char * output, pte_t pte);
+// void do_showmappings(uintptr_t startva, uintptr_t endva)
+// {
+// 	cprintf("Show mappings for VA [0x%08x, 0x%08x]\n", startva, endva);
+// 	cprintf("\n%-10s | %-10s | %s\n", "VA", "PA", "PERMS (present|R/W|U/S|WriteThru|CacheEnabled|Accessed|Dirty|PS|Global)");
+// 	for (int i = 0; i < NPDENTRIES; ++i) {
+// 		pde_t *pd = kern_pgdir + i;
+// 		if (*pd & PTE_P) {
+// 			uintptr_t va = ((uintptr_t)i) << PDXSHIFT;
+// 			physaddr_t pa = PTE_ADDR(*pd);
+// 			char perm[20];
+// 			parse_perm(perm, *pd);
+// 			cprintf("0x%08x | 0x%08x | %s\n", va, pa, perm);
+// 		}
+// 	}
+// }
+// void
+// parse_perm(char * output, pte_t pte)
+// {
+// 	strcpy(output, "-|R|S|-|T|-|-|4k|-");
+// 	if (pte & PTE_P)
+// 		output[0] = 'P';
+// 	if (pte & PTE_W)
+// 		output[2] = 'W';
+// 	if (pte & PTE_U)
+// 		output[4] = 'U';
+// 	if (pte & PTE_PWT)
+// 		output[6] = 'T';
+// 	if (pte & PTE_PCD)
+// 		output[8] = '-';
+// 	if (pte & PTE_A)
+// 		output[10] = 'A';
+// 	if (pte & PTE_D)
+// 		output[12] = 'D';
+// 	if (pte & PTE_PS)
+// 		output[15] = 'M';
+// 	if (pte & PTE_G)
+// 		output[17] = 'G';
+// }
 
 // --------------------------------------------------------------
 // Tracking of physical pages.
@@ -521,19 +571,33 @@ pgdir_walk(pde_t *pgdir, const void *va, int create)
 	pde_t *ppde = pgdir + PDX(va);
 	if (*ppde == 0) {
 		// return null if dir entry not exist and create is false
-		if (create == false)
+		if (create == PGDIR_WALK_NO_CREATE)
 			return NULL;
-		// create page table entry if not exist
-		// alloc the page for the page table
-		struct PageInfo *pg_info = page_alloc(ALLOC_ZERO);
-		if (pg_info == 0)
-			return NULL;
-		++pg_info->pp_ref;
-		physaddr_t pgpa = page2pa(pg_info);
-		// set up the pgdir to point to the new page
-		*ppde = pgpa | PTE_P | PTE_W | PTE_U;
 	}
-	// obtain the page table
+	if (*ppde == 0) {
+		// create page table entry if not exist
+		if (create == PGDIR_WALK_CREATE_REG) {
+			// alloc the page for the page table
+			struct PageInfo *pg_info = page_alloc(ALLOC_ZERO);
+			if (pg_info == 0)
+				return NULL;
+			++pg_info->pp_ref;
+			physaddr_t pgpa = page2pa(pg_info);
+			// set up the pgdir to point to the new page
+			*ppde = pgpa | PTE_P | PTE_W | PTE_U;
+		}
+		else if (create == PGDIR_WALK_CREATE_SUPER) {
+			return ppde;
+		}
+		else
+			panic("Unknown pgdir_walk create enum %d\n", create);
+	}
+	// obtain the page entry
+	if ((*ppde & PTE_PS) != 0) {
+		// superpage, pde is the pte
+		return ppde;
+	}
+	// 4k page, pte is from pagetable
 	pte_t *pgtable = (pte_t *)KADDR(PTE_ADDR(*ppde));
 	pte_t *ppte = pgtable + PTX(va);
 
@@ -558,16 +622,19 @@ boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm
 	uintptr_t va_start = va;
 	uintptr_t va_end = va + size;
 	// the va >= va_start is because the range could wrap around for unsigned arithmetic
+	bool spage = ((perm & PTE_PS) != 0);
+	uintptr_t pgsize = spage ? SPGSIZE : PGSIZE;
+	int create = spage ? PGDIR_WALK_CREATE_SUPER : PGDIR_WALK_CREATE_REG;
 	while (va < va_end && va >= va_start) {
-		pte_t *ppte = pgdir_walk(pgdir, (const void*) va, true);
+		pte_t *ppte = pgdir_walk(pgdir, (const void*) va, create);
 		assert(ppte != NULL);
 		if (*ppte == 0) {
 			// add mapping
 			*ppte = pa | perm;
 		}
 		assert(PTE_ADDR(*ppte) == pa);
-		va += PGSIZE;
-		pa += PGSIZE;
+		va += pgsize;
+		pa += pgsize;
 	}
 }
 
@@ -602,7 +669,9 @@ page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 	// Fill this function in
 	assert(pp != NULL);
 	assert(pp->pp_link == NULL);
-	pte_t *ppte = pgdir_walk(pgdir, va, true);
+	bool spage = ((perm & PTE_PS) != 0);
+	int create = spage ? PGDIR_WALK_CREATE_SUPER : PGDIR_WALK_CREATE_REG;
+	pte_t *ppte = pgdir_walk(pgdir, va, create);
 	if (ppte == NULL)
 		return -E_NO_MEM;
 	physaddr_t pa = page2pa(pp);
@@ -645,7 +714,7 @@ struct PageInfo *
 page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 {
 	// Fill this function in
-	pte_t *ppte = pgdir_walk(pgdir, va, false);
+	pte_t *ppte = pgdir_walk(pgdir, va, PGDIR_WALK_NO_CREATE);
 	if (ppte == NULL)
 		return NULL;
 	if ((*ppte | PTE_P) == 0)
@@ -737,11 +806,11 @@ check_page_free_list(bool only_low_memory)
 		if (PDX(page2pa(pp)) < pdx_limit)
 			memset(page2kva(pp), 0x97, 128);
 	}
+
 	for (spp = spage_free_list; spp; spp = spp->pp_link) {
 		if (PDX(page2pa(spp)) < pdx_limit)
-			memset(page2kva(spp), 0x97, 128);
+			memset(page2kva(spp), 0x98, 128);
 	}
-
 
 	first_free_page = (char *) boot_alloc(0);
 	for (pp = page_free_list; pp; pp = pp->pp_link) {
@@ -895,20 +964,23 @@ check_kern_pgdir(void)
 	// check pages array
 	n = ROUNDUP(npages*sizeof(struct PageInfo), PGSIZE);
 	for (i = 0; i < n; i += PGSIZE)
-		assert(check_va2pa(pgdir, UPAGES + i) == PADDR(pages) + i);
+		assert(check_va2pa(pgdir, UPAGES + i, NULL) == PADDR(pages) + i);
 
 
 	// check phys mem
-	for (i = 0; i < npages * PGSIZE; i += PGSIZE)
-		assert(check_va2pa(pgdir, KERNBASE + i) == i);
+	for (i = 0; i < npages * PGSIZE; ) {
+		bool spage = false;
+		assert(check_va2pa(pgdir, KERNBASE + i, &spage) == i);
+		i += spage ? SPGSIZE : PGSIZE;
+	}
 
 	// check kernel stack
 	for (i = 0; i < KSTKSIZE; i += PGSIZE) {
-		physaddr_t mypa1 = check_va2pa(pgdir, KSTACKTOP - KSTKSIZE + i);
+		physaddr_t mypa1 = check_va2pa(pgdir, KSTACKTOP - KSTKSIZE + i, NULL);
 		physaddr_t mypa2 = PADDR(bootstack) + i;
-		assert(check_va2pa(pgdir, KSTACKTOP - KSTKSIZE + i) == PADDR(bootstack) + i);
+		assert(mypa1 == mypa2);
 	}
-	assert(check_va2pa(pgdir, KSTACKTOP - PTSIZE) == ~0);
+	assert(check_va2pa(pgdir, KSTACKTOP - PTSIZE, NULL) == ~0);
 
 	// check PDE permissions
 	for (i = 0; i < NPDENTRIES; i++) {
@@ -934,15 +1006,21 @@ check_kern_pgdir(void)
 // defined by the page directory 'pgdir'.  The hardware normally performs
 // this functionality for us!  We define our own version to help check
 // the check_kern_pgdir() function; it shouldn't be used elsewhere.
+// Note: returns spage from last param.
 
 static physaddr_t
-check_va2pa(pde_t *pgdir, uintptr_t va)
+check_va2pa(pde_t *pgdir, uintptr_t va, bool *spage)
 {
 	pte_t *p;
 
 	pgdir = &pgdir[PDX(va)];
 	if (!(*pgdir & PTE_P))
 		return ~0;
+	if (*pgdir & PTE_PS) {
+		if (spage)
+			*spage = true;
+		return PTE_ADDR(*pgdir);
+	}
 	p = (pte_t*) KADDR(PTE_ADDR(*pgdir));
 	if (!(p[PTX(va)] & PTE_P))
 		return ~0;
@@ -988,13 +1066,13 @@ check_page(void)
 	page_free(pp0);
 	assert(page_insert(kern_pgdir, pp1, 0x0, PTE_W) == 0);
 	assert(PTE_ADDR(kern_pgdir[0]) == page2pa(pp0));
-	assert(check_va2pa(kern_pgdir, 0x0) == page2pa(pp1));
+	assert(check_va2pa(kern_pgdir, 0x0, NULL) == page2pa(pp1));
 	assert(pp1->pp_ref == 1);
 	assert(pp0->pp_ref == 1);
 
 	// should be able to map pp2 at PGSIZE because pp0 is already allocated for page table
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W) == 0);
-	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp2));
+	assert(check_va2pa(kern_pgdir, PGSIZE, NULL) == page2pa(pp2));
 	assert(pp2->pp_ref == 1);
 
 	// should be no free memory
@@ -1002,7 +1080,7 @@ check_page(void)
 
 	// should be able to map pp2 at PGSIZE because it's already there
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W) == 0);
-	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp2));
+	assert(check_va2pa(kern_pgdir, PGSIZE, NULL) == page2pa(pp2));
 	assert(pp2->pp_ref == 1);
 
 	// pp2 should NOT be on the free list
@@ -1011,30 +1089,30 @@ check_page(void)
 
 	// check that pgdir_walk returns a pointer to the pte
 	ptep = (pte_t *) KADDR(PTE_ADDR(kern_pgdir[PDX(PGSIZE)]));
-	assert(pgdir_walk(kern_pgdir, (void*)PGSIZE, 0) == ptep+PTX(PGSIZE));
+	assert(pgdir_walk(kern_pgdir, (void*)PGSIZE, PGDIR_WALK_NO_CREATE) == ptep+PTX(PGSIZE));
 
 	// should be able to change permissions too.
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W|PTE_U) == 0);
-	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp2));
+	assert(check_va2pa(kern_pgdir, PGSIZE, NULL) == page2pa(pp2));
 	assert(pp2->pp_ref == 1);
-	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & PTE_U);
+	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, PGDIR_WALK_NO_CREATE) & PTE_U);
 	assert(kern_pgdir[0] & PTE_U);
 
 	// should be able to remap with fewer permissions
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W) == 0);
-	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & PTE_W);
-	assert(!(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & PTE_U));
+	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, PGDIR_WALK_NO_CREATE) & PTE_W);
+	assert(!(*pgdir_walk(kern_pgdir, (void*) PGSIZE, PGDIR_WALK_NO_CREATE) & PTE_U));
 
 	// should not be able to map at PTSIZE because need free page for page table
 	assert(page_insert(kern_pgdir, pp0, (void*) PTSIZE, PTE_W) < 0);
 
 	// insert pp1 at PGSIZE (replacing pp2)
 	assert(page_insert(kern_pgdir, pp1, (void*) PGSIZE, PTE_W) == 0);
-	assert(!(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & PTE_U));
+	assert(!(*pgdir_walk(kern_pgdir, (void*) PGSIZE, PGDIR_WALK_NO_CREATE) & PTE_U));
 
 	// should have pp1 at both 0 and PGSIZE, pp2 nowhere, ...
-	assert(check_va2pa(kern_pgdir, 0) == page2pa(pp1));
-	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp1));
+	assert(check_va2pa(kern_pgdir, 0, NULL) == page2pa(pp1));
+	assert(check_va2pa(kern_pgdir, PGSIZE, NULL) == page2pa(pp1));
 	// ... and ref counts should reflect this
 	assert(pp1->pp_ref == 2);
 	assert(pp2->pp_ref == 0);
@@ -1044,8 +1122,8 @@ check_page(void)
 
 	// unmapping pp1 at 0 should keep pp1 at PGSIZE
 	page_remove(kern_pgdir, 0x0);
-	assert(check_va2pa(kern_pgdir, 0x0) == ~0);
-	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp1));
+	assert(check_va2pa(kern_pgdir, 0x0, NULL) == ~0);
+	assert(check_va2pa(kern_pgdir, PGSIZE, NULL) == page2pa(pp1));
 	assert(pp1->pp_ref == 1);
 	assert(pp2->pp_ref == 0);
 
@@ -1056,8 +1134,8 @@ check_page(void)
 
 	// unmapping pp1 at PGSIZE should free it
 	page_remove(kern_pgdir, (void*) PGSIZE);
-	assert(check_va2pa(kern_pgdir, 0x0) == ~0);
-	assert(check_va2pa(kern_pgdir, PGSIZE) == ~0);
+	assert(check_va2pa(kern_pgdir, 0x0, NULL) == ~0);
+	assert(check_va2pa(kern_pgdir, PGSIZE, NULL) == ~0);
 	assert(pp1->pp_ref == 0);
 	assert(pp2->pp_ref == 0);
 
@@ -1076,7 +1154,7 @@ check_page(void)
 	// check pointer arithmetic in pgdir_walk
 	page_free(pp0);
 	va = (void*)(PGSIZE * NPDENTRIES + PGSIZE);
-	ptep = pgdir_walk(kern_pgdir, va, 1);
+	ptep = pgdir_walk(kern_pgdir, va, PGDIR_WALK_CREATE_REG);
 	ptep1 = (pte_t *) KADDR(PTE_ADDR(kern_pgdir[PDX(va)]));
 	assert(ptep == ptep1 + PTX(va));
 	kern_pgdir[PDX(va)] = 0;
@@ -1085,7 +1163,7 @@ check_page(void)
 	// check that new page tables get cleared
 	memset(page2kva(pp0), 0xFF, PGSIZE);
 	page_free(pp0);
-	pgdir_walk(kern_pgdir, 0x0, 1);
+	pgdir_walk(kern_pgdir, 0x0, PGDIR_WALK_CREATE_REG);
 	ptep = (pte_t *) page2kva(pp0);
 	for(i=0; i<NPTENTRIES; i++)
 		assert((ptep[i] & PTE_P) == 0);

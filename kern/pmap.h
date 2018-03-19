@@ -50,6 +50,13 @@ enum {
 	ALLOC_ZERO = 1<<0,
 };
 
+enum {
+	// For pgdir_walk create
+	PGDIR_WALK_NO_CREATE = 0,
+	PGDIR_WALK_CREATE_REG = 1,
+	PGDIR_WALK_CREATE_SUPER = 2,
+};
+
 void	mem_init(void);
 
 void	page_init(void);

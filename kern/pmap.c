@@ -491,25 +491,28 @@ page_init(void)
 // Returns NULL if out of free memory.
 //
 // Hint: use page2kva and memset
-int oo = 0;
 struct PageInfo *
 page_alloc(int alloc_flags)
 {
 	struct PageInfo *pp;
 	// Fill this function in
-	if (page_free_list == NULL)
+	bool spage = ((alloc_flags & ALLOC_SUPER) != 0);
+	struct PageInfo **pfl = spage ? &spage_free_list : &page_free_list;		
+	if (*pfl == NULL)
 		return NULL;
 
-	pp = page_free_list;
-	page_free_list = pp->pp_link;
-	pp->pp_link = NULL;
+	int end = spage ? PG_PER_SPG : 1;
 
-	if (alloc_flags & ALLOC_ZERO)
-		memset(page2kva(pp), 0, PGSIZE);
-
-	if ((uintptr_t)pp == 0xf0119868) {
-		oo++;
+	pp = *pfl;
+	struct PageInfo *curr_pp = pp;
+	for (int i = 0; i < end; ++i, ++curr_pp) {
+		*pfl = curr_pp->pp_link;
+		curr_pp->pp_link = NULL;
 	}
+
+	uint32_t pgsize = spage ? SPGSIZE : PGSIZE;
+	if (alloc_flags & ALLOC_ZERO)
+		memset(page2kva(pp), 0, pgsize);
 
 	return pp;
 }
@@ -528,8 +531,17 @@ page_free(struct PageInfo *pp)
 		panic("page_free() when pp_ref is %d", pp->pp_ref);
 	if (pp->pp_link != NULL)
 		panic("page_free() when pp_link is 0x%08x", pp->pp_ref);
-	pp->pp_link = page_free_list;
-	page_free_list = pp;
+	// handle superpage and regular page differently
+	if (pp->pp_flags & PP_SUPER) {
+		for (int i = 0; i < PG_PER_SPG; ++i, ++pp) {
+			pp->pp_link = spage_free_list;
+			spage_free_list = pp;
+		}
+	}
+	else {
+		pp->pp_link = page_free_list;
+		page_free_list = pp;
+	}
 }
 
 //

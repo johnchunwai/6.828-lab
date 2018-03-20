@@ -172,6 +172,10 @@ extern volatile pde_t uvpd[];     // VA of current page directory
  * You can map a struct PageInfo * to the corresponding physical address
  * with page2pa() in kern/pmap.h.
  */
+enum {
+	PP_SUPER = 0x1,
+};
+
 struct PageInfo {
 	// Next page on the free list.
 	struct PageInfo *pp_link;
@@ -182,6 +186,8 @@ struct PageInfo {
 	// boot_alloc do not have valid reference count fields.
 
 	uint16_t pp_ref;
+	// record properties such as whether this is a superpage
+	uint16_t pp_flags;
 };
 
 #endif /* !__ASSEMBLER__ */

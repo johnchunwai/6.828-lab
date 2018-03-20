@@ -498,8 +498,19 @@ page_alloc(int alloc_flags)
 	// Fill this function in
 	bool spage = ((alloc_flags & ALLOC_SUPER) != 0);
 	struct PageInfo **pfl = spage ? &spage_free_list : &page_free_list;		
-	if (*pfl == NULL)
-		return NULL;
+	if (*pfl == NULL) {
+		if (!spage) {
+			// reg alloc can steal from spage
+			if (spage_free_list == NULL)
+				return NULL
+			// steal by moving pages from spage freelist to reg freelist
+			// TODO: Fix check alignment for spages
+			// TODO: Fix steal free from spage
+			// TODO: Fix free's alignment
+		}
+		else
+			return NULL;
+	}
 
 	int end = spage ? PG_PER_SPG : 1;
 
@@ -532,15 +543,26 @@ page_free(struct PageInfo *pp)
 	if (pp->pp_link != NULL)
 		panic("page_free() when pp_link is 0x%08x", pp->pp_ref);
 	// handle superpage and regular page differently
-	if (pp->pp_flags & PP_SUPER) {
-		for (int i = 0; i < PG_PER_SPG; ++i, ++pp) {
-			pp->pp_link = spage_free_list;
-			spage_free_list = pp;
+	if (!(pp->pp_flags & PP_SUPER)) {
+		// check whether we could merge free blocks and add it to sfree
+		bool spage = true;
+		struct PageInfo *cpp = pp + 1;
+		for (int i = 1; i < PG_PER_SPG; ++i,++cpp) {
+			if (cpp->pp_link == NULL) {
+				spage = false;
+				break;
+			}
+		}
+		if (!spage) { 
+			pp->pp_link = page_free_list;
+			page_free_list = pp;
+			return;
 		}
 	}
-	else {
-		pp->pp_link = page_free_list;
-		page_free_list = pp;
+	// spage
+	for (int i = 0; i < PG_PER_SPG; ++i, ++pp) {
+		pp->pp_link = spage_free_list;
+		spage_free_list = pp;
 	}
 }
 
@@ -681,7 +703,9 @@ page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 	// Fill this function in
 	assert(pp != NULL);
 	assert(pp->pp_link == NULL);
-	bool spage = ((perm & PTE_PS) != 0);
+	bool spage = pp->pp_flags & ALLOC_SUPER;
+	if (spage)
+		perm |= PTE_PS;
 	int create = spage ? PGDIR_WALK_CREATE_SUPER : PGDIR_WALK_CREATE_REG;
 	pte_t *ppte = pgdir_walk(pgdir, va, create);
 	if (ppte == NULL)
@@ -1233,4 +1257,59 @@ check_page_installed_pgdir(void)
 	page_free(pp0);
 
 	cprintf("check_page_installed_pgdir() succeeded!\n");
+}
+
+static void get_free_page_counts(int &spgcount, int &pgcount)
+{
+	*spgcount = *pgcount = 0;
+	for (struct PageInfo* pp = spage_free_list; pp; pp = pp->pp_link)
+		*spgcount += 1;
+	for (struct PageInfo* pp = page_free_list; pp; pp = pp->pp_link)
+		*pgcount += 1;
+}
+
+// check mixed pages
+static void
+check_mixed_page(void)
+{
+	struct PageInfo *pp, *pp0, *pp1, *pp2;
+	struct PageInfo *fl;
+	pte_t *ptep, *ptep1;
+	uintptr_t va;
+	int i;
+
+	int spgcount, pgcount;
+	get_free_page_counts(&spgcount, &pgcount);
+	
+	// alloc 3 spages and free them
+	pp0 = pp1 = pp2 = 0;
+
+	assert((pp0 = page_alloc(ALLOC_SUPER)));
+	assert((pp1 = page_alloc(ALLOC_SUPER)));
+	assert((pp2 = page_alloc(ALLOC_SUPER)));
+
+	int scount, count;
+	get_free_page_counts(&scount, &count);
+	assert(count == pgcount);
+	assert(scount == (spgcount - 3 * PG_PER_SPG));
+
+	page_free(pp0);
+	page_free(pp1);
+	page_free(pp2);
+
+	get_free_page_counts(&scount, &count);
+	assert(count == pgcount);
+	assert(scount == spgcount);
+
+	// steal all the reg free pages
+	// alloc a couple of reg pages
+	// it should steal from super free pages
+
+	// free one page and free pages should have 1 entry
+
+	// free the last page and the free page should merge back into reg
+
+	// restore the free pages we took
+
+	cprintf("check_mixed_page() succeeded!\n");
 }

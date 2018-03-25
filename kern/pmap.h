@@ -90,6 +90,14 @@ page2kva(struct PageInfo *pp)
 	return KADDR(page2pa(pp));
 }
 
+static struct PageInfo*
+get_spage_aligned_page(struct PageInfo *pp)
+{
+	physaddr_t pa = page2pa(pp);
+	physaddr_t spa = ROUNDDOWN(pa, SPGSIZE);
+	return pa2page(spa);
+}
+
 pte_t *pgdir_walk(pde_t *pgdir, const void *va, int create);
 
 #endif /* !JOS_KERN_PMAP_H */

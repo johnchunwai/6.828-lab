@@ -80,7 +80,7 @@ static inline struct PageInfo*
 pa2page(physaddr_t pa)
 {
 	if (PGNUM(pa) >= npages)
-		panic("pa2page called with invalid pa");
+		panic("pa2page called with invalid pa 0x%08x\n", pa);
 	return &pages[PGNUM(pa)];
 }
 
@@ -95,7 +95,10 @@ get_spage_aligned_page(struct PageInfo *pp)
 {
 	physaddr_t pa = page2pa(pp);
 	physaddr_t spa = ROUNDDOWN(pa, SPGSIZE);
-	return pa2page(spa);
+	struct PageInfo *spp = pa2page(spa);
+	cprintf("debug: get_space_aligned_page returns pa 0x%08x; pp=0x%08x\n",
+		spa, spp);
+	return spp;
 }
 
 pte_t *pgdir_walk(pde_t *pgdir, const void *va, int create);

@@ -473,6 +473,7 @@ page_init(void)
 			assert(i + PG_PER_SPG < npages);
 			pages[i].pp_link = spage_free_list;
 			spage_free_list = &pages[i];
+			cprintf("pp idx=%d; pa=0x%08x added to spage_free_list\n", i, page2pa(&pages[i]));
 			// everything is memset 0 already
 			for (int j = 1; j < PG_PER_SPG; ++j) {
 				assert(pages[i+j].pp_link == 0);
@@ -521,6 +522,8 @@ page_alloc(int alloc_flags)
 		pp->pp_flags = PP_SUPER;
 		spage_free_list = pp->pp_link;
 		pp->pp_link = NULL;
+		cprintf("page_alloc spage: page2pa=0x%08x; pp=0x%08x; pp_ref=%d; pp_link=0x%08x; pp_flags=0x%08x\n",
+			page2pa(pp), pp, pp->pp_ref, pp->pp_link, pp->pp_flags);
 	}
 	else {
 		// reg page
@@ -530,6 +533,7 @@ page_alloc(int alloc_flags)
 				return NULL;
 
 			// steal from spage freelist
+			cprintf("stealing from spage free list\n");
 			pp = spage_free_list;
 			spage_free_list = pp->pp_link;
 			pp->pp_link = NULL;
@@ -550,6 +554,7 @@ page_alloc(int alloc_flags)
 			page_free_list = pp->pp_link;
 			pp->pp_flags = 0;
 			pp->pp_link = NULL;
+			cprintf("alloc reg pp 0x%08x; page2pa=0x%08x\n", pp, page2pa(pp));
 		}
 	}
 	if (alloc_flags && ALLOC_ZERO) {
@@ -624,6 +629,10 @@ page_free(struct PageInfo *pp)
 				--npages_to_move;
 			}
 			assert(npages_to_move == 0);
+			//
+			// finally, set pp to spp so the spage aligned pp will
+			// be added to spage free list instead of an unaligned one
+			pp = spp;
 		}
 	}
 	// spage

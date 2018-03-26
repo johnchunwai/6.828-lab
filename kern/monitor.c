@@ -12,18 +12,21 @@
 #include <kern/kdebug.h>
 #include <kern/pmap.h>
 
-#define CMDBUF_SIZE	80	// enough for one VGA text line
-#define PERMBUF_SIZE 20	// enough for storing permission flags
+#define CMDBUF_SIZE	80			// enough for one VGA text line
+#define PERMBUF_SIZE 20			// enough for storing permission flags
+#define MALLOC_HEADER_SIZE 8	// store alloc size and to align mem
 
 
 // declaration
 extern struct PageInfo *page_free_list;
 extern struct PageInfo *spage_free_list;
 
+static void * heap_pos = (void *) UTEXT;
+
 static int check_addr_range(uint32_t startaddr, uint32_t endaddr);
 static void parse_perm(char * output, pte_t pte);
 static void do_showmappings(uintptr_t startva, uintptr_t endva);
-static void do_showpdes(uintptr_t startva, uintptr_t endva);
+static void do_showpde(uintptr_t startva, uintptr_t endva);
 static void do_dumpva(uintptr_t startva, uintptr_t endva);
 
 
@@ -43,12 +46,14 @@ static struct Command commands[] = {
 	{ "help", "Display this list of commands", mon_help },
 	{ "kerninfo", "Display information about the kernel", mon_kerninfo },
 	{ "sm", "Display physical mappings and permission bits for VA range (eg. 0x3000, 0x6000)", mon_showmappings },
-	{ "sd", "Display PDEs VA range (eg. 0x3000, 0x6000)", mon_showpdes },
+	{ "sd", "Display PDEs VA range (eg. 0x3000, 0x6000)", mon_showpde },
 	{ "mem", "Display general mem info", mon_meminfo },
-	{ "setperm", "Set permission to a va page (eg. addperm permname val(1/0) vastart vaend)", mon_setperm},
-	{ "dumpva", "Dump mem for va range", mon_dumpva},
-	{ "dumppa", "Dump mem for pa range", mon_dumppa},
-	{ "freepginfo", "Show some free page info", mon_freepginfo},
+	{ "setperm", "Set permission to a va page (eg. addperm permname val(1/0) vastart vaend)", mon_setperm },
+	{ "dumpva", "Dump mem for va range", mon_dumpva },
+	{ "dumppa", "Dump mem for pa range", mon_dumppa },
+	{ "freepginfo", "Show some free page info", mon_freepginfo },
+	{ "malloc", "Alloc mem (8 byte aligned)", mon_malloc },
+	{ "free", "Free malloc'ed mem", mon_free },
 };
 
 static struct Perm perms[] = {
@@ -92,6 +97,119 @@ mon_kerninfo(int argc, char **argv, struct Trapframe *tf)
 }
 
 int
+mon_malloc(int argc, char **argv, struct Trapframe *tf)
+{
+	if (argc != 2) {
+		cprintf("Usage: malloc num_bytes\n");
+		return -1;
+	}
+
+	uint32_t num_bytes = (uint32_t) strtol(argv[1], NULL, 10);
+	if (num_bytes == 0) {
+		cprintf("Malloc size cannot be 0\n");
+		return -1;
+	}
+	if (num_bytes > SPGSIZE - MALLOC_HEADER_SIZE) {
+		cprintf("Malloc size must be under %u\n", SPGSIZE - MALLOC_HEADER_SIZE);
+		return -1;
+	}
+
+	// settings for reg page
+	uint32_t pgsize = PGSIZE;
+	int alloc_flags = ALLOC_ZERO;
+	int perm = PTE_P|PTE_W|PTE_U;
+	if (num_bytes > PGSIZE - MALLOC_HEADER_SIZE) {
+		// alloc spage
+		pgsize = SPGSIZE;
+		alloc_flags |= ALLOC_SUPER;
+		perm |= PTE_PS;
+	}
+
+	// do the actual allocation
+	struct PageInfo *pp = page_alloc(alloc_flags);
+	if (pp == NULL) {
+		cprintf("page_alloc returns NULL\n");
+		return -2;
+	}
+	cprintf("after page_alloc\n");
+	cprintf("page2pa = 0x%08x\n", page2pa(pp));
+	cprintf("pp at 0x%08x; pp_ref=%d; pp_link=0x%08x; pp_flags=0x%08x\n",
+		pp, pp->pp_ref, pp->pp_link, pp->pp_flags);
+
+	// I'm not bothered to check for heap overflow into stack etc.
+	int ret = page_insert(kern_pgdir, pp, heap_pos, perm);
+	if (ret != 0) {
+		cprintf("page_insert fail returns %d\n", ret);
+		// need to free the page
+		page_free(pp);
+		return -3;
+	}
+	cprintf("after page_insert\n");
+	cprintf("page2pa = 0x%08x\n", page2pa(pp));
+	cprintf("pp at 0x%08x; pp_ref=%d; pp_link=0x%08x; pp_flags=0x%08x\n",
+		pp, pp->pp_ref, pp->pp_link, pp->pp_flags);
+
+	// write the malloc header. This is no necessary but it's a good
+	// test for the allocation and page entry set up.
+	// use the 1st 4 bytes for size, next 4 bytes are reserved for now
+	uint32_t *header = (uint32_t *) heap_pos;
+	*header = pgsize;
+	cprintf("Written 0x%08x to 0x%08x\n", pgsize, header);
+	cprintf("VA 0x%08x value = 0x%08x\n", header, *header);
+
+	// output result
+	cprintf("%d bytes allocated at 0x%08x\n", pgsize, heap_pos + MALLOC_HEADER_SIZE);
+	heap_pos += pgsize;
+
+	return 0;
+}
+
+int
+mon_free(int argc, char **argv, struct Trapframe *tf)
+{
+	if (argc != 2) {
+		cprintf("Usage: free malloc_addr\n");
+		return -1;
+	}
+
+	// Get the alloc pos and check the header.
+	uintptr_t malloc_addr = (uintptr_t) strtol(argv[1], NULL, 16);
+	void *p = (void *) (malloc_addr - MALLOC_HEADER_SIZE);
+	uint32_t pgsize = *(uint32_t *) p;
+	cprintf("ptr = 0x%08x; malloc header shows alloc size = %u\n", p, pgsize);
+
+	// Find the page. Not needed but as a test.
+	struct PageInfo *pp = page_lookup(kern_pgdir, p, NULL);
+	if (pp == NULL) {
+		cprintf("No page found at 0x%08x\n", p);
+		return -2;
+	}
+	cprintf("after page_lookup\n");
+	cprintf("pp at 0x%08x; pp_ref=%d; pp_link=0x%08x; pp_flags=0x%08x\n",
+		pp, pp->pp_ref, pp->pp_link, pp->pp_flags);
+	cprintf("page2pa(pp) = 0x%08x\n", page2pa(pp));
+	
+	// validate the header size matches the page info
+	if (pp->pp_flags & PP_SUPER) {
+		assert(pgsize == SPGSIZE);
+	}
+	else {
+		assert(pgsize == PGSIZE);
+	}
+
+	// This is actually the only call needed.
+	page_remove(kern_pgdir, p);
+	cprintf("after page_remove\n");
+	cprintf("pp=0x%08x; pp_link=0x%08x; pp_flags=0x%08x; pp_ref=%d\n",
+		pp, pp->pp_link, pp->pp_flags, pp->pp_ref);
+
+	// I'm too lazy to implement heap tracking. So, I'll naively just let
+	// it grow indefinitely until it crashes.
+	
+	return 0;
+}
+
+int
 check_addr_range(uint32_t startaddr, uint32_t endaddr)
 {
 	if (endaddr <= startaddr) {
@@ -110,8 +228,6 @@ mon_freepginfo(int argc, char **argv, struct Trapframe *tf)
 		++spgcount;
 	for (struct PageInfo* pp = page_free_list; pp; pp = pp->pp_link)
 		++pgcount;
-	assert((spgcount % PG_PER_SPG) == 0);
-	spgcount = spgcount / PG_PER_SPG;
 	cprintf("  free superpage count %d\n", spgcount);
 	cprintf("  free page count %d\n", pgcount);
 
@@ -322,10 +438,10 @@ void do_showmappings(uintptr_t startva, uintptr_t endva)
 }
 
 int
-mon_showpdes(int argc, char **argv, struct Trapframe *tf)
+mon_showpde(int argc, char **argv, struct Trapframe *tf)
 {
 	if (argc != 3) {
-		cprintf("Usage: showpdes start_va end_va (exclusive)\n");
+		cprintf("Usage: showpde start_va end_va (exclusive)\n");
 		return -1;
 	}
 
@@ -335,12 +451,12 @@ mon_showpdes(int argc, char **argv, struct Trapframe *tf)
 	if (0 != check_addr_range(startva, endva))
 		return -1;
 
-	do_showpdes(startva, endva);
+	do_showpde(startva, endva);
 
 	return 0;
 }
 
-void do_showpdes(uintptr_t startva, uintptr_t endva)
+void do_showpde(uintptr_t startva, uintptr_t endva)
 {
 	cprintf("Show PDEs for VA [0x%08x, 0x%08x]\n", startva, endva);
 	cprintf("\n%-10s | %-10s | %s\n", "VA", "PA", "PERMS (present|R/W|U/S|WriteThru|CacheEnabled|Accessed|Dirty|PS|Global)");
